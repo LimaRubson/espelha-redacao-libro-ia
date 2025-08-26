@@ -6,11 +6,16 @@ from typing import Optional, Dict, Any, Tuple
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
-from streamlit.components.v1 import html
+
+# --- import seguro do dotenv (tolerante se o pacote não estiver instalado) ---
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
 
 # ==============================
 # Configuração de página e estilo
@@ -24,17 +29,19 @@ st.set_page_config(
 
 CUSTOM_CSS = """
 <style>
+/* Layout */
 .block-container { padding-top: 1rem; padding-bottom: 1rem; }
 header[data-testid="stHeader"] { backdrop-filter: blur(6px); }
 
-/* Badges e cards */
+/* Badges de status */
 .badge {
   display:inline-block; padding: 0.25rem 0.7rem; border-radius: 999px;
   font-size: 0.8rem; font-weight: 700; border: 1px solid transparent;
 }
-.badge.status-ok   { background: #DCFCE7; color:#14532D; border-color:#86EFAC; }      /* Atualizado */
-.badge.status-warn { background: #FEE2E2; color:#7F1D1D; border-color:#FCA5A5; }      /* Não atualizado */
+.badge.status-ok   { background: #DCFCE7; color:#14532D; border-color:#86EFAC; }   /* Atualizado */
+.badge.status-warn { background: #FEE2E2; color:#7F1D1D; border-color:#FCA5A5; }   /* Não atualizado */
 
+/* Cards de resumo */
 .stat-card {
   border:1px solid #E2E8F0; border-radius: 14px; padding: 1rem; background:white;
   box-shadow: 0 1px 3px rgba(0,0,0,0.03);
@@ -42,11 +49,13 @@ header[data-testid="stHeader"] { backdrop-filter: blur(6px); }
 .stat-value { font-size: 1.2rem; font-weight: 700; }
 .stat-label { font-size: 0.85rem; color: #475569; }
 
+/* Barra superior */
 .toolbar {
   border:1px solid #E2E8F0; border-radius: 14px; padding: 0.75rem; background:white;
   display:flex; gap:0.5rem; align-items:center; justify-content:space-between;
 }
 
+/* Editor */
 textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
@@ -64,8 +73,10 @@ textarea {
 .cz-img {
   display: block;
   width: 100%;
+  height: 100%;
+  object-fit: contain;              /* imagem completa no estado inicial */
   transform-origin: var(--cx, 50%) var(--cy, 50%);
-  transition: transform 120ms ease, translate 120ms ease;
+  transition: transform 120ms ease, translate 120ms ease, cursor 120ms ease;
   cursor: zoom-in;
 }
 .cz-hint {
@@ -76,7 +87,25 @@ textarea {
   padding: 6px 10px;
   border-radius: 999px;
   font-size: 12px;
+  z-index: 3;
 }
+.cz-controls {
+  position: absolute;
+  left: 10px; bottom: 10px;
+  display: flex; gap: 6px;
+  z-index: 4;
+}
+.cz-btn {
+  background: rgba(255,255,255,.95);
+  border: 1px solid #CBD5E1;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-weight: 700;
+  font-size: 14px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  cursor: pointer;
+}
+.cz-btn:active { transform: translateY(1px); }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -94,30 +123,54 @@ def _clean_env(s: Optional[str]) -> str:
         s = s[1:-1]
     return s
 
-@st.cache_resource(show_spinner=False)
-def build_engine() -> Engine:
-    load_dotenv()
-    conn = _clean_env(os.getenv("DB_CONNECTION", "mysql")).lower()
-    if conn != "mysql":
-        raise RuntimeError("Somente MySQL é suportado (DB_CONNECTION=mysql).")
-    host = _clean_env(os.getenv("DB_HOST", ""))
-    port = int(_clean_env(os.getenv("DB_PORT", "3306")) or "3306")
-    db   = _clean_env(os.getenv("DB_DATABASE", "corrigeai"))
-    user = _clean_env(os.getenv("DB_USERNAME", "udb"))
-    pw   = _clean_env(os.getenv("DB_PASSWORD", ""))
-
-    url = f"mysql+pymysql://{user}:{pw}@{host}:{port}/{db}?charset=utf8mb4"
-    return create_engine(url, pool_pre_ping=True, pool_recycle=1800)
-
 def _safe_image_url(raw: Optional[str]) -> Optional[str]:
     if not raw:
         return None
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw
-    # Ajuste aqui se quiser prefixar domínio/pasta:
+    # Se preferir, defina um prefixo do seu bucket:
     # base = "https://seu-bucket.s3.sa-east-1.amazonaws.com/"
     # return base + raw.lstrip("/")
     return raw
+
+# ==============================
+# Engine: st.secrets → .env → os.environ
+# ==============================
+@st.cache_resource(show_spinner=False)
+def build_engine() -> Engine:
+    # 1) Secrets (ideal p/ Streamlit Cloud)
+    secrets_db = {}
+    try:
+        secrets_db = st.secrets.get("db", st.secrets)
+    except Exception:
+        secrets_db = {}
+
+    def _get(name: str, default: str = "") -> str:
+        if name in secrets_db:
+            return str(secrets_db.get(name, default))
+        return os.getenv(name, default)
+
+    # 2) .env (se disponível)
+    load_dotenv()
+
+    conn = _get("DB_CONNECTION", "mysql").lower()
+    if conn != "mysql":
+        raise RuntimeError("Somente MySQL é suportado (DB_CONNECTION=mysql).")
+
+    host = _clean_env(_get("DB_HOST", ""))
+    port = int(_get("DB_PORT", "3306") or "3306")
+    db   = _clean_env(_get("DB_DATABASE", "corrigeai"))
+    user = _clean_env(_get("DB_USERNAME", "udb"))
+    pw   = _clean_env(_get("DB_PASSWORD", ""))
+
+    if not host or not pw:
+        raise RuntimeError(
+            "Credenciais do banco ausentes. Defina em st.secrets ou no .env: "
+            "DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD."
+        )
+
+    url = f"mysql+pymysql://{user}:{pw}@{host}:{port}/{db}?charset=utf8mb4"
+    return create_engine(url, pool_pre_ping=True, pool_recycle=1800)
 
 # ==============================
 # Zoom por clique (JS puro)
@@ -300,9 +353,8 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
     </script>
     """, height=height_px+6, scrolling=False)
 
-
 # ==============================
-# Acesso ao banco (AGORA: tudo em textos_digitados)
+# Acesso ao banco (tudo em textos_digitados)
 # ==============================
 def get_resumo(engine: Engine) -> Tuple[int, int, int]:
     q = text("""
@@ -369,7 +421,7 @@ def carregar_redacao(engine: Engine, redacao_id: int) -> Dict[str, Any]:
 
 def salvar_texto(engine: Engine, redacao_id: int, novo_texto: str, imagem_url: Optional[str]) -> None:
     """
-    Atualiza textos_digitados (status=1). Se não existir, insere usando a imagem informada.
+    Atualiza textos_digitados (status=1). Se não existir, insere com a imagem informada.
     """
     upd = text("""
         UPDATE textos_digitados
@@ -394,17 +446,16 @@ if "loaded_redacao_id" not in st.session_state:
     st.session_state.loaded_redacao_id = None
 if "last_saved_text" not in st.session_state:
     st.session_state.last_saved_text = ""
-# O text_area usará este key para manter o texto entre reruns:
 if "texto_digitado_input" not in st.session_state:
     st.session_state.texto_digitado_input = ""
 
 # ==============================
-# Inicialização
+# Inicialização / conexão
 # ==============================
 try:
     engine = build_engine()
 except Exception as e:
-    st.error("Falha ao conectar no banco de dados. Verifique o .env.")
+    st.error("Falha ao conectar no banco de dados. Defina credenciais em st.secrets ou .env.")
     st.exception(e)
     st.stop()
 
@@ -420,16 +471,16 @@ except SQLAlchemyError as e:
 # ==============================
 col_a, col_b, col_c = st.columns(3)
 with col_a:
-    st.markdown(f'</br><div class="stat-card"><div class="stat-value">{total}</div><div class="stat-label">Total</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat-card"><div class="stat-value">{total}</div><div class="stat-label">Total</div></div>', unsafe_allow_html=True)
 with col_b:
-    st.markdown(f'</br><div class="stat-card"><div class="stat-value">{pendentes}</div><div class="stat-label">Não atualizadas</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat-card"><div class="stat-value">{pendentes}</div><div class="stat-label">Não atualizadas</div></div>', unsafe_allow_html=True)
 with col_c:
-    st.markdown(f'</br><div class="stat-card"><div class="stat-value">{concluidos}</div><div class="stat-label">Atualizadas</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat-card"><div class="stat-value">{concluidos}</div><div class="stat-label">Atualizadas</div></div>', unsafe_allow_html=True)
 
 st.write("")
 
 # ==============================
-# Sidebar — Filtros e Navegação
+# Sidebar — Filtros e Navegação (sem None; já seleciona a 1ª)
 # ==============================
 st.sidebar.markdown("### Filtros")
 somente_pendentes = st.sidebar.toggle("Mostrar apenas 'Não atualizadas'", value=True)
@@ -442,24 +493,21 @@ except SQLAlchemyError as e:
     st.exception(e)
     st.stop()
 
-# Monta ids e rótulos
 ids = df_lista["redacao_id"].tolist()
 labels_map = {
     int(rid): f"{int(rid)}  —  {'Não atualizado' if int(status) == 0 else 'Atualizado'}"
     for rid, status in zip(df_lista["redacao_id"], df_lista["status"])
 }
 
-# Se não houver itens, avisa e encerra cedo
 if not ids:
     st.sidebar.info("Nenhuma redação encontrada com os filtros atuais.")
     st.info("Ajuste os filtros na barra lateral para exibir redações.")
     st.stop()
 
-# Garante que sempre haja um selecionado válido (1º item por padrão)
-if "selecionado" not in st.session_state or st.session_state.selecionado not in ids:
+# Garante um selecionado válido
+if st.session_state.selecionado not in ids:
     st.session_state.selecionado = ids[0]
 
-# Select sem 'None', usando id como option e format_func para o rótulo
 selecionado_id = st.sidebar.selectbox(
     "Selecione uma redação",
     options=ids,
@@ -467,10 +515,9 @@ selecionado_id = st.sidebar.selectbox(
     format_func=lambda rid: labels_map.get(int(rid), str(rid))
 )
 
-# Atualiza sessão se mudou a seleção
 if selecionado_id != st.session_state.selecionado:
     st.session_state.selecionado = selecionado_id
-    st.session_state.loaded_redacao_id = None  # força recarga do texto desta redação
+    st.session_state.loaded_redacao_id = None
 
 # Navegação rápida
 st.sidebar.markdown("### Navegação rápida")
@@ -501,18 +548,14 @@ st.markdown(
     '<div class="toolbar">'
     '<div><strong>Conferência de Redação</strong></div>'
     '<div style="display:flex;gap:.5rem;align-items:center;">'
-    '<span class="badge">Clique na imagem para ampliar</span>'
+    '<span class="badge">Clique/roda: zoom • arraste: mover</span>'
     '<span class="badge">Edite o texto à direita</span>'
     '</div></div>',
     unsafe_allow_html=True
 )
 st.write("")
 
-if st.session_state.selecionado is None:
-    st.info("Selecione uma redação na barra lateral para começar.")
-    st.stop()
-
-# Carrega dados da redação
+# Carrega dados da redação selecionada
 try:
     dados = carregar_redacao(engine, st.session_state.selecionado)
 except Exception as e:
@@ -520,7 +563,7 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# Inicializa o texto do editor somente quando muda a redação
+# Atualiza o editor somente quando muda a redação
 if st.session_state.loaded_redacao_id != dados["redacao_id"]:
     st.session_state.texto_digitado_input = dados["texto_digitado"] or ""
     st.session_state.last_saved_text = dados["texto_digitado"] or ""
@@ -528,7 +571,7 @@ if st.session_state.loaded_redacao_id != dados["redacao_id"]:
 
 col_esq, col_dir = st.columns([1, 1])
 
-# --------- Esquerda: Imagem com zoom por clique ----------
+# --------- Esquerda: Imagem com zoom ----------
 with col_esq:
     st.markdown("#### Imagem da redação")
     if dados["imagem_url"]:
@@ -536,7 +579,8 @@ with col_esq:
             image_url=dados["imagem_url"],
             height_px=760,
             step=0.5,
-            max_scale=4.0
+            max_scale=4.0,
+            min_scale=1.0
         )
     else:
         st.warning("Nenhuma imagem associada a este redacao_id.")
@@ -544,15 +588,12 @@ with col_esq:
 # --------- Direita: Editor + Status + Salvar ----------
 with col_dir:
     st.markdown("#### Texto digitado (editável)")
-
-    # Status (interface) — mapeado do status do banco
     status_db = int(dados["status"])
     if status_db == 1:
         st.markdown('<span class="badge status-ok">Atualizado</span>', unsafe_allow_html=True)
     else:
         st.markdown('<span class="badge status-warn">Não atualizado</span>', unsafe_allow_html=True)
 
-    # Editor (sem form; leitura direta do state para evitar bug do "segunda vez")
     st.text_area(
         "Edite abaixo e clique em Salvar",
         key="texto_digitado_input",
@@ -567,7 +608,7 @@ with col_dir:
             salvar_texto(engine, dados["redacao_id"], curr_text, dados["imagem_url"])
             st.session_state.last_saved_text = curr_text
             st.toast("Salvo com sucesso! Status atualizado para 'Atualizado'.", icon="✅")
-            st.rerun()  # garante atualização imediata do status/contadores
+            st.rerun()  # garante atualização imediata de status/contadores
         except SQLAlchemyError as e:
             st.error("Erro ao salvar no banco de dados.")
             st.exception(e)
@@ -577,7 +618,7 @@ with col_dir:
             curr_text = st.session_state.get("texto_digitado_input", "")
             salvar_texto(engine, dados["redacao_id"], curr_text, dados["imagem_url"])
             st.session_state.last_saved_text = curr_text
-            st.toast("Salvo com sucesso! Indo para a próxima…", icon="✅")
+            # vai para o próximo
             if st.session_state.selecionado in ids:
                 idx = ids.index(st.session_state.selecionado)
                 if idx < len(ids) - 1:
@@ -595,4 +636,4 @@ with col_dir:
 
 # Rodapé
 st.write("---")
-st.caption("CorreigeAI • Conferência de redações — credenciais do banco lidas via .env (não exibidas na interface).")
+st.caption("CorreigeAI • Conferência de redações — credenciais do banco lidas via st.secrets/.env (não exibidas na interface).")
