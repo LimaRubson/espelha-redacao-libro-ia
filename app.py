@@ -471,11 +471,11 @@ except SQLAlchemyError as e:
 # ==============================
 col_a, col_b, col_c = st.columns(3)
 with col_a:
-    st.markdown(f'<div class="stat-card"><div class="stat-value">{total}</div><div class="stat-label">Total</div></div>', unsafe_allow_html=True)
+    st.markdown(f'</br><div class="stat-card"><div class="stat-value">{total}</div><div class="stat-label">Total</div></div>', unsafe_allow_html=True)
 with col_b:
-    st.markdown(f'<div class="stat-card"><div class="stat-value">{pendentes}</div><div class="stat-label">Não atualizadas</div></div>', unsafe_allow_html=True)
+    st.markdown(f'</br><div class="stat-card"><div class="stat-value">{pendentes}</div><div class="stat-label">Não atualizadas</div></div>', unsafe_allow_html=True)
 with col_c:
-    st.markdown(f'<div class="stat-card"><div class="stat-value">{concluidos}</div><div class="stat-label">Atualizadas</div></div>', unsafe_allow_html=True)
+    st.markdown(f'</br><div class="stat-card"><div class="stat-value">{concluidos}</div><div class="stat-label">Atualizadas</div></div>', unsafe_allow_html=True)
 
 st.write("")
 
