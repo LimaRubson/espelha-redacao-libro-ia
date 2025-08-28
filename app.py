@@ -173,7 +173,7 @@ def build_engine() -> Engine:
     return create_engine(url, pool_pre_ping=True, pool_recycle=1800)
 
 # ==============================
-# Zoom por clique (JS puro)
+# Zoom por clique (com wheel) + anti-click pós-pan
 # ==============================
 def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, max_scale: float = 4.0, min_scale: float = 1.0):
     """
@@ -182,7 +182,8 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
     - Roda do mouse: aumenta/diminui zoom (para frente + / para trás -).
     - Duplo clique: reset.
     - Arraste (mouse/touch): move quando ampliada.
-    - Imagem inicial com object-fit: contain (aparece completa na área).
+    - Anti-zoom após pan: ignora o 'click' que vem logo depois de arrastar.
+    - Mantém o comportamento visual original (imagem aparece inteira).
     """
     from streamlit.components.v1 import html
 
@@ -207,60 +208,31 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
         transition: transform 120ms ease, translate 120ms ease, cursor 120ms ease;
         cursor: zoom-in;
       }}
-      .cz-hint {{
-        position: absolute;
-        right: 10px; bottom: 10px;
-        background: rgba(15,23,42,.75);
-        color: #fff;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-size: 12px;
-        z-index: 3;
-      }}
-      .cz-controls {{
-        position: absolute;
-        left: 10px; bottom: 10px;
-        display: flex; gap: 6px;
-        z-index: 4;
-      }}
-      .cz-btn {{
-        background: rgba(255,255,255,.95);
-        border: 1px solid #CBD5E1;
-        border-radius: 8px;
-        padding: 4px 10px;
-        font-weight: 700;
-        font-size: 14px;
-        box-shadow: 0 1px 2px rgba(0,0,0,.06);
-        cursor: pointer;
-      }}
-      .cz-btn:active {{ transform: translateY(1px); }}
     </style>
 
     <div class="cz-wrap" id="cz-wrap">
       <img id="cz-img" class="cz-img" src="{image_url}" alt="Redação" />
-      <!--div class="cz-controls">
-        <button id="cz-zoom-out" class="cz-btn">−</button>
-        <button id="cz-zoom-in" class="cz-btn">＋</button>
-        <button id="cz-reset" class="cz-btn">⟲</button>
-      </div>
-      <div class="cz-hint">clique: +zoom • Shift+clique: −zoom • roda do mouse: ± • duplo clique: reset • arraste: mover</div-->
     </div>
 
     <script>
     (function(){{
       const img = document.getElementById('cz-img');
       const wrap = document.getElementById('cz-wrap');
-      const btnIn  = document.getElementById('cz-zoom-in');
-      const btnOut = document.getElementById('cz-zoom-out');
-      const btnReset = document.getElementById('cz-reset');
 
-      let scale = {min_scale};
+      let scale = {min_scale};           // 1.0 (tamanho normal)
       const step = {step};
       const maxScale = {max_scale};
       const minScale = {min_scale};
-      let posX = 0, posY = 0;      // translate em px
+
+      let posX = 0, posY = 0;            // translate em px
       let isPanning = false;
       let startX = 0, startY = 0;
+
+      // ---- flags anti-click pós-pan ----
+      const DRAG_THRESHOLD = 5;          // px de deslocamento para considerar "pan"
+      let downX = 0, downY = 0;
+      let movedSinceDown = false;
+      let ignoreNextClick = false;
 
       function clamp(v, lo, hi) {{
         return Math.max(lo, Math.min(hi, v));
@@ -268,13 +240,16 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
 
       function applyTransform() {{
         img.style.transform = 'scale(' + scale + ') translate(' + posX + 'px, ' + posY + 'px)';
-        img.style.cursor = scale > 1 ? 'grab' : 'zoom-in';
+        img.style.cursor = scale > 1 ? (isPanning ? 'grabbing' : 'grab') : 'zoom-in';
       }}
 
       function setOriginFromEvent(e) {{
         const rect = img.getBoundingClientRect();
-        const x = ((e.clientX || (e.touches && e.touches[0].clientX)) - rect.left) / rect.width * 100;
-        const y = ((e.clientY || (e.touches && e.touches[0].clientY)) - rect.top)  / rect.height * 100;
+        const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+        const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+        if (clientX == null || clientY == null) return;
+        const x = (clientX - rect.left) / rect.width * 100;
+        const y = (clientY - rect.top)  / rect.height * 100;
         img.style.setProperty('--cx', x + '%');
         img.style.setProperty('--cy', y + '%');
       }}
@@ -287,9 +262,11 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
         applyTransform();
       }}
 
-      // Clique: +zoom | Shift+clique: -zoom
+      // Clique: +zoom | Shift+clique: -zoom (com antirruído pós-pan)
       wrap.addEventListener('click', (e) => {{
-        if (e.detail > 1) return;  // parte do dblclick
+        if (ignoreNextClick) {{ ignoreNextClick = false; return; }}  // suprime click após pan
+        if (e.detail > 1) return;  // evita duplicar com dblclick
+        if (typeof e.button === 'number' && e.button !== 0) return; // só botão esquerdo
         zoomBy(e.shiftKey ? -step : step, e);
       }});
 
@@ -307,21 +284,39 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
 
       // Pan com mouse
       wrap.addEventListener('mousedown', (e) => {{
-        if (scale <= minScale) return;
+        if (typeof e.button === 'number' && e.button !== 0) return; // só botão esquerdo
+        if (scale <= minScale) return;    // só pan quando ampliada
         isPanning = true;
-        img.style.cursor = 'grabbing';
+        movedSinceDown = false;
+        downX = e.clientX; downY = e.clientY;
         startX = e.clientX - posX;
         startY = e.clientY - posY;
+        img.style.cursor = 'grabbing';
         e.preventDefault();
       }});
+
       window.addEventListener('mousemove', (e) => {{
         if (!isPanning) return;
         posX = e.clientX - startX;
         posY = e.clientY - startY;
+
+        // marca como "moveu" se passou do limiar
+        if (!movedSinceDown) {{
+          if (Math.abs(e.clientX - downX) > DRAG_THRESHOLD || Math.abs(e.clientY - downY) > DRAG_THRESHOLD) {{
+            movedSinceDown = true;
+          }}
+        }}
         applyTransform();
       }});
+
       window.addEventListener('mouseup', () => {{
+        if (!isPanning) return;
         isPanning = false;
+        if (movedSinceDown) {{
+          // Se houve pan real, ignore o click que o navegador dispara depois do mouseup
+          ignoreNextClick = true;
+          setTimeout(() => {{ ignoreNextClick = false; }}, 250);
+        }}
         if (scale > minScale) img.style.cursor = 'grab';
       }});
 
@@ -330,22 +325,34 @@ def render_click_zoom(image_url: str, height_px: int = 760, step: float = 0.5, m
         if (scale <= minScale) return;
         const t = e.touches[0];
         isPanning = true;
+        movedSinceDown = false;
+        downX = t.clientX; downY = t.clientY;
         startX = t.clientX - posX;
         startY = t.clientY - posY;
       }}, {{passive:true}});
+
       wrap.addEventListener('touchmove', (e) => {{
         if (!isPanning) return;
         const t = e.touches[0];
         posX = t.clientX - startX;
         posY = t.clientY - startY;
+
+        if (!movedSinceDown) {{
+          if (Math.abs(t.clientX - downX) > DRAG_THRESHOLD || Math.abs(t.clientY - downY) > DRAG_THRESHOLD) {{
+            movedSinceDown = true;
+          }}
+        }}
         applyTransform();
       }}, {{passive:true}});
-      wrap.addEventListener('touchend', () => {{ isPanning = false; }});
 
-      // Controles (+, −, reset)
-      //btnIn.addEventListener('click', (e) => {{ zoomBy(step, e); }});
-      //btnOut.addEventListener('click', (e) => {{ zoomBy(-step, e); }});
-      //btnReset.addEventListener('click', () => {{ scale = minScale; posX = 0; posY = 0; applyTransform(); }});
+      wrap.addEventListener('touchend', () => {{
+        if (!isPanning) return;
+        isPanning = false;
+        if (movedSinceDown) {{
+          ignoreNextClick = true;
+          setTimeout(() => {{ ignoreNextClick = false; }}, 250);
+        }}
+      }});
 
       // Inicial
       applyTransform();
